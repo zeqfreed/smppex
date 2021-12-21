@@ -50,8 +50,7 @@ defmodule Smppex.Mixfile do
       {:earmark, "~> 1.4", only: :dev},
       {:ex_doc, ex_doc_version(), only: :dev},
       {:credo, "~> 1.5", only: [:dev, :test], runtime: false},
-      {:ranch, "~> 1.8"},
-      {:poison, "~> 3.0"}
+      {:ranch, "~> 1.8"}
     ]
   end
 
