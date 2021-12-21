@@ -100,9 +100,9 @@ defmodule SMPPEX.TransportSession do
 
   # Ranch'es granting reimplementation
 
-  defp grant_socket(pid, ref, transport, socket, timeout) do
+  defp grant_socket(pid, ref, transport, socket, _timeout) do
     transport.controlling_process(socket, pid)
-    Kernel.send(pid, {:shoot, ref, transport, socket, timeout})
+    Kernel.send(pid, {:socket_granted, ref})
     {:ok, pid}
   end
 
@@ -112,13 +112,33 @@ defmodule SMPPEX.TransportSession do
     {:ok, args}
   end
 
-  def init(ref, socket, transport, opts) do
-    {module, module_opts, mode} = opts
+  def init(ref, _socket, transport, {module, module_opts, :mc}) do
+    :ok = ProcLib.init_ack({:ok, self()})
+    {:ok, socket} = Ranch.handshake(ref)
 
     case module.init(socket, transport, module_opts) do
       {:ok, module_state} ->
+        state = %TransportSession{
+          ref: ref,
+          socket: socket,
+          transport: transport,
+          module: module,
+          module_state: module_state,
+          buffer: <<>>
+        }
+
+        enter_loop(state)
+
+      {:stop, reason} ->
+        :ok = ProcLib.init_ack({:error, reason})
+    end
+  end
+
+  def init(ref, socket, transport, {module, module_opts, :esme}) do
+    case module.init(socket, transport, module_opts) do
+      {:ok, module_state} ->
         :ok = ProcLib.init_ack({:ok, self()})
-        accept_ack(ref, mode)
+        :ok = accept_grant(ref)
 
         state = %TransportSession{
           ref: ref,
@@ -129,24 +149,37 @@ defmodule SMPPEX.TransportSession do
           buffer: <<>>
         }
 
-        wait_for_data(state)
-        GenServerErl.enter_loop(__MODULE__, [], state)
+        enter_loop(state)
 
       {:stop, reason} ->
         :ok = ProcLib.init_ack({:error, reason})
     end
   end
 
-  defp accept_ack(ref, :mc), do: Ranch.accept_ack(ref)
-
-  defp accept_ack(ref, :esme) do
+  defp accept_grant(ref) do
     receive do
-      {:shoot, ^ref, _transport, _socket, _ack_timeout} -> :ok
+      {:socket_granted, ^ref} -> :ok
+    end
+  end
+
+  defp enter_loop(state) do
+    case wait_for_data(state) do
+      {:noreply, new_state} ->
+        GenServerErl.enter_loop(__MODULE__, [], new_state)
+
+      {:stop, reason, _state} ->
+        Process.exit(self(), reason)
     end
   end
 
   defp wait_for_data(state) do
-    :ok = state.transport.setopts(state.socket, [{:active, :once}])
+    {_ok, closed, _error} = state.transport.messages
+
+    case state.transport.setopts(state.socket, [{:active, :once}]) do
+      :ok -> {:noreply, state}
+      {:error, ^closed} -> handle_socket_closed(state)
+      {:error, reason} -> handle_socket_error(state, reason)
+    end
   end
 
   def handle_info(message, state) do
